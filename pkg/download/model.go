@@ -85,12 +85,24 @@ func (t *Task) Name() string {
 
 func (t *Task) MarshalJSON() ([]byte, error) {
 	type rawTaskType Task
+	var fileProgress map[int]int64
+	if t.Protocol == "bt" && t.fetcher != nil && t.Meta != nil && t.Meta.Opts != nil {
+		progress := t.fetcher.Progress()
+		if len(progress) == len(t.Meta.Opts.SelectFiles) {
+			fileProgress = make(map[int]int64, len(progress))
+			for offset, index := range t.Meta.Opts.SelectFiles {
+				fileProgress[index] = progress[offset]
+			}
+		}
+	}
 	jsonTask := struct {
 		rawTaskType
-		Name string `json:"name"`
+		Name         string        `json:"name"`
+		FileProgress map[int]int64 `json:"fileProgress,omitempty"`
 	}{
 		rawTaskType(*t),
 		t.Name(),
+		fileProgress,
 	}
 	return json.Marshal(jsonTask)
 }
