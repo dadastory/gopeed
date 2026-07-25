@@ -1071,7 +1071,10 @@ func (d *Downloader) watch(task *Task) {
 			}
 
 			go func() {
-				_, err2 := d.CreateDirect(
+				if d.GetTask(task.ID) == nil {
+					return
+				}
+				childID, err2 := d.CreateDirect(
 					&base.Request{
 						URL: downloadFilePath,
 					},
@@ -1082,6 +1085,20 @@ func (d *Downloader) watch(task *Task) {
 				if err2 != nil {
 					d.Logger.Error().Err(err2).Msgf("auto create torrent task failed, task id: %s", task.ID)
 					return
+				}
+
+				// Keep an explicit persistent relation to the generated task. This
+				// avoids clients having to infer ownership by listing every task.
+				// If the descriptor was removed while the child was being created,
+				// remove the child as well so cancellation cannot leave an orphan.
+				if d.GetTask(task.ID) == nil {
+					_ = d.Delete(&TaskFilter{IDs: []string{childID}}, true)
+					return
+				}
+				task.FollowedBy = childID
+				task.UpdatedAt = time.Now()
+				if err := d.storage.Put(bucketTask, task.ID, task.clone()); err != nil {
+					d.Logger.Error().Err(err).Msgf("persist auto torrent relation failed, task id: %s", task.ID)
 				}
 
 				if shouldDelete {

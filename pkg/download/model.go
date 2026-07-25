@@ -21,15 +21,19 @@ type ResolveResult struct {
 }
 
 type Task struct {
-	ID        string               `json:"id"`
-	Protocol  string               `json:"protocol"`
-	Meta      *fetcher.FetcherMeta `json:"meta"`
-	Status    base.Status          `json:"status"`
-	Uploading bool                 `json:"uploading"`
-	Progress  *Progress            `json:"progress"`
-	IsCreated bool                 `json:"isCreated"`
-	CreatedAt time.Time            `json:"createdAt"`
-	UpdatedAt time.Time            `json:"updatedAt"`
+	ID       string `json:"id"`
+	Protocol string `json:"protocol"`
+	// FollowedBy identifies a task that Gopeed created from this completed
+	// descriptor task (currently a native BitTorrent task). It is persisted so
+	// API consumers can follow the task without scanning unrelated downloads.
+	FollowedBy string               `json:"followedBy,omitempty"`
+	Meta       *fetcher.FetcherMeta `json:"meta"`
+	Status     base.Status          `json:"status"`
+	Uploading  bool                 `json:"uploading"`
+	Progress   *Progress            `json:"progress"`
+	IsCreated  bool                 `json:"isCreated"`
+	CreatedAt  time.Time            `json:"createdAt"`
+	UpdatedAt  time.Time            `json:"updatedAt"`
 
 	fetcherManager fetcher.FetcherManager
 	fetcher        fetcher.Fetcher
