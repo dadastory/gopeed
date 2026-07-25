@@ -495,6 +495,22 @@ func (d *Downloader) Create(rrId string) (taskId string, err error) {
 	return d.doCreate(fetcher, nil)
 }
 
+// DiscardResolved releases a resolver that was created for inspection but will
+// not become a download task. It is deliberately separate from Delete because
+// a resolve has no task record yet.
+func (d *Downloader) DiscardResolved(rrId string) error {
+	d.fetcherMapLock.Lock()
+	fetcher, ok := d.fetcherCache[rrId]
+	if ok {
+		delete(d.fetcherCache, rrId)
+	}
+	d.fetcherMapLock.Unlock()
+	if !ok {
+		return errors.New("invalid resource id")
+	}
+	return fetcher.Pause()
+}
+
 // Patch modifies task-specific data based on the protocol.
 // For HTTP protocol, it can modify Request info.
 // For BT protocol, it can modify SelectFiles.
