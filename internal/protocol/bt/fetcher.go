@@ -23,21 +23,19 @@ import (
 	"github.com/anacrolix/torrent/storage"
 )
 
-var (
-	cfg       *torrent.ClientConfig
-	client    *torrent.Client
-	lock      sync.Mutex
-	closeCtx  context.Context
-	closeFunc func()
-)
-
 type Fetcher struct {
 	ctl    *controller.Controller
 	config *config
 
-	torrent *torrent.Torrent
-	meta    *fetcher.FetcherMeta
-	data    *fetcherData
+	torrent   *torrent.Torrent
+	client    *torrent.Client
+	cfg       *torrent.ClientConfig
+	closeCtx  context.Context
+	closeFunc context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
+	meta      *fetcher.FetcherMeta
+	data      *fetcherData
 
 	torrentReady    atomic.Bool
 	torrentUpload   atomic.Bool
@@ -61,34 +59,63 @@ func (f *Fetcher) Setup(ctl *controller.Controller) {
 }
 
 func (f *Fetcher) initClient() (err error) {
-	lock.Lock()
-	defer lock.Unlock()
-
-	if client != nil {
+	if f.client != nil {
 		return
 	}
-	if closeCtx == nil {
-		closeCtx, closeFunc = context.WithCancel(context.Background())
+	if err = base.ParseOptExtra[bt.OptsExtra](f.meta.Opts); err != nil {
+		return err
 	}
 
-	cfg = torrent.NewDefaultClientConfig()
-	cfg.Seed = true
-	cfg.Bep20 = fmt.Sprintf("-GP%s-", parseBep20())
-	cfg.ExtendedHandshakeClientVersion = fmt.Sprintf("Gopeed %s", base.Version)
-	cfg.ListenPort = f.config.ListenPort
-	cfg.HTTPProxy = f.ctl.GetProxy(f.meta.Req.Proxy)
+	f.cfg, err = bitTorrentClientConfig(f.meta.Opts)
+	if err != nil {
+		return err
+	}
+	f.cfg.Seed = true
+	f.cfg.Bep20 = fmt.Sprintf("-GP%s-", parseBep20())
+	f.cfg.ExtendedHandshakeClientVersion = fmt.Sprintf("Gopeed %s", base.Version)
+	f.cfg.ListenPort = f.config.ListenPort
+	f.cfg.HTTPProxy = f.ctl.GetProxy(f.meta.Req.Proxy)
 	dnsResolver := &DnsCacheResolver{RefreshTimeout: 5 * time.Minute}
-	cfg.TrackerDialContext = dnsResolver.DialContext
-	client, err = torrent.NewClient(cfg)
+	f.cfg.TrackerDialContext = dnsResolver.DialContext
+	if policy := bitTorrentOutboundPolicy(f.meta.Opts); policy != nil {
+		f.cfg.TrackerDialContext = policy.dialContext(20 * time.Second)
+		f.cfg.HTTPDialContext = policy.dialContext(20 * time.Second)
+		f.cfg.IPBlocklist = policy
+	}
+	f.client, err = torrent.NewClient(f.cfg)
 	if err != nil {
 		return
 	}
 
-	closeCtx, closeFunc = context.WithCancel(context.Background())
+	f.closeCtx, f.closeFunc = context.WithCancel(context.Background())
 	go func() {
-		dnsResolver.Run(closeCtx)
+		dnsResolver.Run(f.closeCtx)
 	}()
 	return
+}
+
+func bitTorrentClientConfig(opts *base.Options) (*torrent.ClientConfig, error) {
+	config := torrent.NewDefaultClientConfig()
+	// anacrolix creates its implicit piece-completion store when the client is
+	// constructed. Set both fields explicitly after the task workspace is
+	// known, otherwise that store can retain the empty default path and try to
+	// write .torrent.bolt.db to Gopeed's read-only working directory.
+	config.DataDir = torrentDataDir(opts)
+	if err := os.MkdirAll(config.DataDir, 0o750); err != nil {
+		return nil, err
+	}
+	config.DefaultStorage = storage.NewFile(config.DataDir)
+	return config, nil
+}
+
+func torrentDataDir(opts *base.Options) string {
+	if opts != nil && opts.Path != "" {
+		// Each remote task owns one client after task-scoped policy was added.
+		// Keep its piece-completion database inside that task's disposable
+		// workspace so concurrent torrents never contend for one Bolt lock.
+		return filepath.Join(opts.Path, ".gopeed-bittorrent")
+	}
+	return filepath.Join(os.TempDir(), "gopeed-bittorrent")
 }
 
 func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
@@ -135,21 +162,38 @@ func (f *Fetcher) Start() (err error) {
 }
 
 func (f *Fetcher) Pause() (err error) {
+	if f.torrent == nil {
+		return fmt.Errorf("BitTorrent task has not been initialized")
+	}
 	f.torrent.DisallowDataDownload()
 	return
 }
 
 func (f *Fetcher) Close() (err error) {
+	f.closeOnce.Do(func() {
+		f.closeErr = f.close()
+	})
+	return f.closeErr
+}
+
+func (f *Fetcher) close() (err error) {
 	f.safeDrop()
-	f.torrentDropFunc()
-	f.uploadDoneCh <- nil
-	if len(client.Torrents()) == 0 {
-		err = closeClient()
+	if f.torrentDropFunc != nil {
+		f.torrentDropFunc()
 	}
-	return nil
+	if f.uploadDoneCh != nil {
+		select {
+		case f.uploadDoneCh <- nil:
+		default:
+		}
+	}
+	return f.closeClient()
 }
 
 func (f *Fetcher) safeDrop() {
+	if f.torrent == nil {
+		return
+	}
 	defer func() {
 		// ignore panic
 		_ = recover()
@@ -447,12 +491,12 @@ func (f *Fetcher) addTorrent(req *base.Request, fromUpload bool) (err error) {
 		}
 	}
 	spec.Storage = storage.NewFileOpts(storage.NewFileClientOpts{
-		ClientBaseDir: cfg.DataDir,
+		ClientBaseDir: f.cfg.DataDir,
 		TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
 			return f.meta.Opts.Path
 		},
 	})
-	f.torrent, _, err = client.AddTorrentSpec(spec)
+	f.torrent, _, err = f.client.AddTorrentSpec(spec)
 	if err != nil {
 		return
 	}
@@ -510,21 +554,19 @@ type fetcherData struct {
 	SeedTime int64
 }
 
-func closeClient() error {
-	lock.Lock()
-	defer lock.Unlock()
-
-	if closeFunc != nil {
-		closeFunc()
+func (f *Fetcher) closeClient() error {
+	if f.closeFunc != nil {
+		f.closeFunc()
 	}
-	if client != nil {
-		errs := client.Close()
+	if f.client != nil {
+		errs := f.client.Close()
 		if len(errs) > 0 {
 			return errs[0]
 		}
-		client = nil
-		closeCtx = nil
-		closeFunc = nil
+		f.client = nil
+		f.cfg = nil
+		f.closeCtx = nil
+		f.closeFunc = nil
 	}
 	return nil
 }
@@ -604,7 +646,7 @@ func (fm *FetcherManager) Restore() (v any, f func(meta *fetcher.FetcherMeta, v 
 }
 
 func (fm *FetcherManager) Close() error {
-	return closeClient()
+	return nil
 }
 
 // parse version to bep20 format, fixed length 4, if not enough, fill 0

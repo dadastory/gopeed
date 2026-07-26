@@ -29,6 +29,7 @@ type Task struct {
 	FollowedBy string               `json:"followedBy,omitempty"`
 	Meta       *fetcher.FetcherMeta `json:"meta"`
 	Status     base.Status          `json:"status"`
+	Error      string               `json:"error,omitempty"`
 	Uploading  bool                 `json:"uploading"`
 	Progress   *Progress            `json:"progress"`
 	IsCreated  bool                 `json:"isCreated"`

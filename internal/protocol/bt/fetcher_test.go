@@ -21,6 +21,24 @@ func TestFetcher_Resolve_Torrent(t *testing.T) {
 	doResolve(t, buildFetcher())
 }
 
+func TestTorrentDataDirUsesWritableDownloadRoot(t *testing.T) {
+	got := torrentDataDir(&base.Options{Path: "/app/Downloads/task-1"})
+	want := "/app/Downloads/task-1/.gopeed-bittorrent"
+	if got != want {
+		t.Fatalf("torrentDataDir() = %q, want %q", got, want)
+	}
+}
+
+func TestBitTorrentClientConfigUsesExplicitWritableDefaultStorage(t *testing.T) {
+	config, err := bitTorrentClientConfig(&base.Options{Path: filepath.Join(t.TempDir(), "task-1")})
+	if err != nil {
+		t.Fatalf("bitTorrentClientConfig() error = %v", err)
+	}
+	if config.DataDir == "" || config.DefaultStorage == nil {
+		t.Fatalf("BitTorrent client did not receive explicit writable storage: %#v", config)
+	}
+}
+
 func TestFetcher_Resolve_DataUri_Torrent(t *testing.T) {
 	fetcher := buildFetcher()
 	buf, err := os.ReadFile("./testdata/ubuntu-22.04-live-server-amd64.iso.torrent")

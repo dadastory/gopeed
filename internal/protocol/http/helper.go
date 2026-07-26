@@ -216,6 +216,15 @@ func (f *Fetcher) buildFastFailClient() *http.Client {
 
 // buildClientWithTimeout creates an HTTP client with the specified connection timeout.
 func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
+	var policy *outboundPolicy
+	if f.meta != nil && f.meta.Opts != nil && f.meta.Opts.Extra != nil {
+		if extra, ok := f.meta.Opts.Extra.(*fhttp.OptsExtra); ok && extra.NetworkPolicy != nil {
+			// The policy has already been validated by CloudRevo. Keep a
+			// defensive fallback here: an invalid optional entry must fail the
+			// request closed instead of silently disabling its restrictions.
+			policy, _ = newOutboundPolicy(extra.NetworkPolicy)
+		}
+	}
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: timeout,
@@ -226,11 +235,20 @@ func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
 		},
 		TLSHandshakeTimeout: timeout,
 	}
+	if policy != nil {
+		transport.DialContext = policy.dialContext(timeout)
+	}
 	jar, _ := cookiejar.New(nil)
-	return &http.Client{
+	client := &http.Client{
 		Transport: transport,
 		Jar:       jar,
 	}
+	if policy != nil {
+		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+			return policy.validateURL(req.Context(), req.URL)
+		}
+	}
+	return client
 }
 
 // ============================================================================

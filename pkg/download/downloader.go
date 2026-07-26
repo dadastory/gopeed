@@ -19,6 +19,7 @@ import (
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/logger"
 	"github.com/GopeedLab/gopeed/pkg/base"
+	btmodel "github.com/GopeedLab/gopeed/pkg/protocol/bt"
 	"github.com/GopeedLab/gopeed/pkg/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/util"
 	gonanoid "github.com/matoous/go-nanoid/v2"
@@ -1074,14 +1075,21 @@ func (d *Downloader) watch(task *Task) {
 				if d.GetTask(task.ID) == nil {
 					return
 				}
+				childOptions := &base.Options{
+					Path:        task.Meta.Opts.Path,
+					SelectFiles: make([]int, 0),
+				}
+				if e.NetworkPolicy != nil {
+					childOptions.Extra = &btmodel.OptsExtra{NetworkPolicy: &btmodel.NetworkPolicy{
+						AllowedHosts: append([]string(nil), e.NetworkPolicy.AllowedHosts...),
+						AllowedCIDRs: append([]string(nil), e.NetworkPolicy.AllowedCIDRs...),
+					}}
+				}
 				childID, err2 := d.CreateDirect(
 					&base.Request{
 						URL: downloadFilePath,
 					},
-					&base.Options{
-						Path:        task.Meta.Opts.Path,
-						SelectFiles: make([]int, 0),
-					})
+					childOptions)
 				if err2 != nil {
 					d.Logger.Error().Err(err2).Msgf("auto create torrent task failed, task id: %s", task.ID)
 					return
@@ -1125,6 +1133,7 @@ func (d *Downloader) watch(task *Task) {
 
 func (d *Downloader) doOnError(task *Task, err error) {
 	d.Logger.Warn().Err(err).Msgf("task download failed, task id: %s", task.ID)
+	task.Error = safeTaskError(err)
 	task.updateStatus(base.DownloadStatusError)
 	d.triggerOnError(task, err)
 	if task.Status == base.DownloadStatusError {
@@ -1133,6 +1142,23 @@ func (d *Downloader) doOnError(task *Task, err error) {
 		d.notifyRunning()
 		d.triggerWebhooks(WebhookEventDownloadError, task, err)
 	}
+}
+
+func safeTaskError(err error) string {
+	if err == nil {
+		return "Gopeed task failed"
+	}
+	message := err.Error()
+	if marker := strings.Index(message, "http request fail, code:"); marker >= 0 {
+		code := message[marker+len("http request fail, code:"):]
+		if end := strings.IndexFunc(code, func(r rune) bool { return r < '0' || r > '9' }); end >= 0 {
+			code = code[:end]
+		}
+		if code != "" {
+			return "source request failed (HTTP " + code + ")"
+		}
+	}
+	return "Gopeed task failed"
 }
 
 func (d *Downloader) restoreTask(task *Task) error {

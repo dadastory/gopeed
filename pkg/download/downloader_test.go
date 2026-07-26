@@ -29,6 +29,16 @@ var testDownloadOpt = &base.Options{
 	},
 }
 
+func TestSafeTaskErrorKeepsOnlyActionableHTTPStatus(t *testing.T) {
+	message := safeTaskError(fmt.Errorf("http request fail, code:403 url=https://downloads.example.test/file?token=secret Authorization: Bearer secret-token /app/storage/private"))
+	if message != "source request failed (HTTP 403)" {
+		t.Fatalf("safeTaskError() = %q", message)
+	}
+	if leaked := safeTaskError(fmt.Errorf("failed token=secret /app/storage/private")); leaked != "Gopeed task failed" {
+		t.Fatalf("safeTaskError() leaked unclassified detail: %q", leaked)
+	}
+}
+
 func TestDownloader_Resolve(t *testing.T) {
 	listener := test.StartTestFileServer()
 	defer listener.Close()
